@@ -1,0 +1,12 @@
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python>=3.9
+  - pandas
+  - scikit-learn==1.2.2
+  - joblib
+  - xgboost
+  - bird_tool_utils_python>=0.4.1
+  - singlem==0.16.0

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+ 
+from sklearn.model_selection import GroupKFold, cross_val_score
+from sklearn.metrics import classification_report
+from sklearn.ensemble import GradientBoostingClassifier
+
+import pandas as pd
+
+import json
+from joblib import dump, load
+import logging, argparse, sys
+
+class Taxonomy:
+    def __str__(self):
+        return '{} {} {} {}'.format(self.tax_id, self.xlevel, self.parent_id, self.sci_name)
+    def __repr__(self):
+        return str(self)
+
+if __name__ == '__main__':
+    parent_parser = argparse.ArgumentParser()
+    
+    parent_parser.add_argument('--debug', help='output debug information', action="store_true")
+    #parent_parser.add_argument('--version', help='output version information and quit',  action='version', version=repeatm.__version__)
+    parent_parser.add_argument('--quiet', help='only output errors', action="store_true")
+
+    parent_parser.add_argument('--model', help='joblib model to predict with', required=True)
+    parent_parser.add_argument('--columns-file', help='list of columns names for X', required=True)
+    parent_parser.add_argument('--acc-organism-csv', help='acc_organism.csv file', required=True)
+    parent_parser.add_argument('--condensed-profiles', help='condensed profiles to predict with', required=True)
+    parent_parser.add_argument('--taxonomy-json', help='taxonomy json file', required=True)
+    parent_parser.add_argument('--output', help='output', required=True)
+
+    args = parent_parser.parse_args()
+
+    # Setup logging
+    if args.debug:
+        loglevel = logging.DEBUG
+    elif args.quiet:
+        loglevel = logging.ERROR
+    else:
+        loglevel = logging.INFO
+    logging.basicConfig(level=loglevel, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
+
+    # Load the actual taxonomies
+    class Taxonomy:
+        def __str__(self):
+            return '{} {} {} {}'.format(self.tax_id, self.xlevel, self.parent_id, self.sci_name)
+        def __repr__(self):
+            return str(self)
+
+    taxonomies = []
+    with open(args.taxonomy_json) as f:
+        for line in f:
+            j = json.loads(line)
+            taxonomy = Taxonomy()
+            taxonomy.sci_name = j['sci_name']
+            taxonomy.parent_id = int(j['parent_id'])
+            taxonomy.xlevel = int(j['xlevel'])
+            taxonomy.tax_id = int(j['tax_id'])
+            taxonomies.append(taxonomy)
+    # Make a list of all the host associated taxonomies, and ecological taxonomies
+    host_associated_taxonomy = list([t for t in taxonomies if t.sci_name == 'organismal metagenomes'])[0]
+    # print(host_associated_taxonomy)
+    ecological_taxonomy = list([t for t in taxonomies if t.sci_name == 'ecological metagenomes'])[0]
+    # print(ecological_taxonomy)
+    host_associated_sci_names = set([t.sci_name for t in taxonomies if t.parent_id == host_associated_taxonomy.tax_id]+[host_associated_taxonomy.sci_name])
+    ecological_sci_names = set([t.sci_name for t in taxonomies if t.parent_id == ecological_taxonomy.tax_id]+[ecological_taxonomy.sci_name])
+
+    metagenome_annotations = pd.read_csv(args.acc_organism_csv)
+    annotations = pd.concat([
+        pd.DataFrame({'host_or_not': 'host', 'organism': list(host_associated_sci_names)}),
+        pd.DataFrame({'host_or_not': 'ecological', 'organism': list(ecological_sci_names)}),
+    ])
+    m2 = metagenome_annotations.merge(annotations, on='organism')
+
+    # load model
+    model = load(args.model)
+    # load columns
+    with open(args.columns_file) as f:
+        columns = list([a.strip() for a in f.readlines()])
+    logging.info("Read in {} columns e.g. {}".format(len(columns), columns[0]))
+
+    # Reshape the annotations
+    
+    phylum_profiles = pd.read_csv(args.condensed_profiles,header=None,sep='\t',compression='gzip')
+    phylum_profiles.columns = ['acc','phylum','relabund','1','2']
+    del phylum_profiles['1']
+    del phylum_profiles['2']
+    phylum_pivot = phylum_profiles.pivot_table(index=['acc'], columns='phylum', values='relabund', fill_value=0).reset_index()
+
+    # Fill in columns with zeroes if they are missing
+    missing_columns = set(columns) - set(phylum_pivot.columns)
+    d = dict.fromkeys(missing_columns, 0)
+    temp_df = pd.DataFrame(d, index=phylum_pivot.index)
+    phylum_pivot = pd.concat([phylum_pivot, temp_df], axis=1)
+
+    # Predict
+    logging.info("Predicting...")
+    predictions = model.predict(phylum_pivot[columns])
+
+    # Output
+    logging.info("Outputing...")
+    df = pd.DataFrame({'acc':phylum_pivot['acc'],'prediction':['host' if p else 'ecological' for p in predictions]})
+    df2 = df.merge(m2[['acc','organism','host_or_not']], on='acc', how='left')
+    df2.to_csv(args.output, index=False, sep='\t')
+    # print("acc\tprediction")
+    # for acc, pred in zip(phylum_pivot['acc'], predictions):
+    #     print('{}\t{}'.format(acc, 'host' if pred else 'ecological'))

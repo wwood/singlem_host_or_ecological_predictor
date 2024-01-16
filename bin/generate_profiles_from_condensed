@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+
+###############################################################################
+#
+#    Copyright (C) 2021 Ben Woodcroft
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+###############################################################################
+
+__author__ = "Ben Woodcroft"
+__copyright__ = "Copyright 2020"
+__credits__ = ["Ben Woodcroft"]
+__license__ = "GPL3"
+__maintainer__ = "Ben Woodcroft"
+__email__ = "benjwoodcroft near gmail.com"
+__status__ = "Development"
+
+import argparse
+import logging
+import sys
+import os
+import shutil
+import csv
+import json
+import datetime
+
+from singlem.condense import CondensedCommunityProfile
+
+if __name__ == '__main__':
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument('--debug', help='output debug information', action="store_true")
+    #parent_parser.add_argument('--version', help='output version information and quit',  action='version', version=repeatm.__version__)
+    parent_parser.add_argument('--quiet', help='only output errors', action="store_true")
+
+    parent_parser.add_argument('--condensed-otu-table', help='condensed OTU table input', required=True)
+    parent_parser.add_argument('--output-prefix', help='output a domain, phylum, class, etc to separate outputs', required=True)
+    # depth_index_target
+    parent_parser.add_argument('--depth-index-targets', nargs='+', help='only output a specific depth index e.g. 2 for phylum', type=int, required=False, default=[2])
+
+    args = parent_parser.parse_args()
+
+    # Setup logging
+    if args.debug:
+        loglevel = logging.DEBUG
+    elif args.quiet:
+        loglevel = logging.ERROR
+    else:
+        loglevel = logging.INFO
+    logging.basicConfig(level=loglevel, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
+
+    depth_index_targets = set(args.depth_index_targets)
+
+    with open(args.condensed_otu_table) as f:
+        output_ios = [None]*8
+        for profile in CondensedCommunityProfile.each_sample_wise(f):
+            # Calculate total coverage
+            total_coverage = 0
+            for node in profile.breadth_first_iter():
+                total_coverage += node.coverage
+            logging.debug("Found total coverage of {} from {}".format(total_coverage, profile.sample))
+
+            for node in profile.breadth_first_iter():
+                depth_index = node.calculate_level()
+                if depth_index == 0:
+                    continue # Don't write Root
+                if depth_index not in depth_index_targets:
+                    continue
+                output_io = output_ios[depth_index]
+                if output_io is None:
+                    output_io = open("{}{}.csv".format(args.output_prefix, depth_index), 'w')
+                    output_ios[depth_index] = output_io
+                output_io.write("{}\t{}\t{}\t{}\t{}\n".format(profile.sample, '; '.join(node.get_taxonomy()), node.get_full_coverage()/total_coverage,  node.get_full_coverage(), total_coverage))
+        for output_io in output_ios:
+            if output_io is not None:
+                output_io.close()

@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+ 
+from sklearn.model_selection import GroupKFold, cross_val_score
+from sklearn.metrics import classification_report
+from sklearn.ensemble import GradientBoostingClassifier
+from xgboost import XGBClassifier
+from sklearn.preprocessing import StandardScaler,MaxAbsScaler
+from sklearn.pipeline import make_pipeline
+
+import pandas as pd
+
+import json
+from joblib import dump, load
+import logging, argparse
+
+class Taxonomy:
+    def __str__(self):
+        return '{} {} {} {}'.format(self.tax_id, self.xlevel, self.parent_id, self.sci_name)
+    def __repr__(self):
+        return str(self)
+
+if __name__ == '__main__':
+    parent_parser = argparse.ArgumentParser()
+    
+    parent_parser.add_argument('--debug', help='output debug information', action="store_true")
+    #parent_parser.add_argument('--version', help='output version information and quit',  action='version', version=repeatm.__version__)
+    parent_parser.add_argument('--quiet', help='only output errors', action="store_true")
+    parent_parser.add_argument('--input-gz-profile', help='input profile to predict with, from generate_profiles_from_condensed', required=True)
+    parent_parser.add_argument('--acc-organism-csv', help='acc_organism.csv file', required=True)
+    parent_parser.add_argument('--sra-taxonomy-table', help='sra_taxonomy_table.json file', required=True)
+    parent_parser.add_argument('--output-joblib', help='output', required=True)
+    parent_parser.add_argument('--output-column-names', help='output', required=True)
+
+    args = parent_parser.parse_args()
+
+    # Setup logging
+    if args.debug:
+        loglevel = logging.DEBUG
+    elif args.quiet:
+        loglevel = logging.ERROR
+    else:
+        loglevel = logging.INFO
+    logging.basicConfig(level=loglevel, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
+
+    logging.info("Loading taxonomy JSON ..")
+    taxonomies = []
+    with open(args.sra_taxonomy_table) as f:
+        for line in f:
+            j = json.loads(line)
+            taxonomy = Taxonomy()
+            taxonomy.sci_name = j['sci_name']
+            taxonomy.parent_id = int(j['parent_id'])
+            taxonomy.xlevel = int(j['xlevel'])
+            taxonomy.tax_id = int(j['tax_id'])
+            taxonomies.append(taxonomy)
+
+
+    # Make a list of all the host associated taxonomies, and ecological taxonomies
+    host_associated_taxonomy = list([t for t in taxonomies if t.sci_name == 'organismal metagenomes'])[0]
+    print(host_associated_taxonomy)
+    ecological_taxonomy = list([t for t in taxonomies if t.sci_name == 'ecological metagenomes'])[0]
+    print(ecological_taxonomy)
+
+    host_associated_sci_names = set([t.sci_name for t in taxonomies if t.parent_id == host_associated_taxonomy.tax_id]+[host_associated_taxonomy.sci_name])
+    ecological_sci_names = set([t.sci_name for t in taxonomies if t.parent_id == ecological_taxonomy.tax_id]+[ecological_taxonomy.sci_name])
+    print(len(host_associated_sci_names))
+    print(len(ecological_sci_names))
+
+    logging.info("Reading acc_organism.csv ..")
+    metagenome_annotations = pd.read_csv(args.acc_organism_csv)
+
+    # Reduce to samples where the organism is host associated or not
+    annotations = pd.concat([
+        pd.DataFrame({'host_or_not': 'host', 'organism': list(host_associated_sci_names)}),
+        pd.DataFrame({'host_or_not': 'ecological', 'organism': list(ecological_sci_names)}),
+    ])
+    m2 = metagenome_annotations.merge(annotations, on='organism')
+
+    logging.info("Reading profiles of each sample ..")
+    phylum_profiles = pd.read_csv(args.input_gz_profile,header=None,sep='\t',compression='gzip')
+
+    phylum_profiles.columns = ['acc','phylum','relabund','1','2']
+    del phylum_profiles['1']
+    del phylum_profiles['2']
+
+    phylum_pivot = phylum_profiles.pivot_table(index=['acc'], columns='phylum', values='relabund', fill_value=0).reset_index()
+    print(phylum_pivot.shape)
+
+    # Define groups for each of the samples
+    phylum_pivot2 = phylum_pivot.merge(m2, on='acc')
+    phylum_pivot3 = phylum_pivot2[[isinstance(x, str) for x in phylum_pivot2['bioproject']]]
+
+    X = phylum_pivot3.drop(['acc','host_or_not','organism','bioproject'],axis=1)
+    y = phylum_pivot3['host_or_not'] == 'host'
+    groups = phylum_pivot3['bioproject']
+    print(X.shape, y.shape, groups.shape)
+
+    classifier = make_pipeline(
+        MaxAbsScaler(),
+        XGBClassifier(n_jobs=64, use_label_encoder=False)
+    )
+
+    logging.info("Cross validating ..")
+    cross_val_scores = cross_val_score(classifier, X, y, groups=groups, cv=GroupKFold(n_splits=5), n_jobs=-1)
+    print(cross_val_scores)
+    print(cross_val_scores.mean())
+
+    # Save model trained on all the data
+    logging.info("Retraining model on all data ..")
+    classifier.fit(X, y)
+    logging.info("Saving model to disk ..")
+    dump(classifier, args.output_joblib)
+    with open(args.output_column_names,'w') as f:
+        f.write('\n'.join(X.columns.to_list()))
+    logging.info("Done")
+
